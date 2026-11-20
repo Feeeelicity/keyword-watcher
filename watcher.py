@@ -8,84 +8,50 @@ from playwright.sync_api import sync_playwright
 
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 KEYWORDS_FILE = "keywords.txt"
 SEEN_FILE = "seen_items.json"
 
-def translate_title_with_gemini(jp_title):
-    if not GEMINI_API_KEY or not jp_title:
-        return jp_title
-    
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    prompt = (
-        "你是日本二手交易平台（Mercari / Yahoo拍賣）動漫周邊與玩具商品翻譯專家。"
-        "請將以下日文商品標題準確翻譯成簡潔自然的繁體中文（香港慣用語）。"
-        "遇到動漫作品與專有名詞請使用常見中文譯名（例如：プリパラ=星光樂園、プリティーリズム=星光少女、アイカツ=星夢學園、プリズムストーン=Prism Stone/光環石、マイメロディ=My Melody、マイスウィートピアノ=My Sweet Piano、ぬいぐるみ=毛公仔/毛絨玩具、まとめ売り=套裝組合/打包出售、未開封=全新未開封）。"
-        "只輸出翻譯後的中文標題本身，絕對不要加任何引號、解釋或額外文字：\n\n"
-        f"{jp_title}"
-    )
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1}
-    }
-    try:
-        res = requests.post(url, json=payload, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            translated = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-            if translated:
-                return translated
-        else:
-            print(f"Gemini API 回應異常: {res.status_code} {res.text}")
-    except Exception as e:
-        print(f"Gemini 翻譯異常（保留原名）: {e}")
-    return jp_title
-
-def get_live_exchange_rate():
+def get_exchange_rates():
+    jpy_to_hkd = 0.050
+    usd_to_jpy = 154.0
     try:
         res = requests.get("https://open.er-api.com/v6/latest/JPY", timeout=8)
         if res.status_code == 200:
-            rate = res.json().get("rates", {}).get("HKD")
-            if rate:
-                return float(rate)
+            rates = res.json().get("rates", {})
+            if rates.get("HKD"):
+                jpy_to_hkd = float(rates["HKD"])
+            if rates.get("USD"):
+                usd_to_jpy = 1.0 / float(rates["USD"])
     except Exception:
         pass
-    try:
-        res = requests.get("https://api.frankfurter.app/latest?from=JPY&to=HKD", timeout=8)
-        if res.status_code == 200:
-            rate = res.json().get("rates", {}).get("HKD")
-            if rate:
-                return float(rate)
-    except Exception:
-        pass
-    return 0.050
+    return jpy_to_hkd, usd_to_jpy
 
-def format_price_hkd_first(yen_amount, rate):
+def format_price_hkd_first(yen_amount, jpy_to_hkd):
     if not yen_amount:
         return "價格未明"
-    hkd_val = round(yen_amount * rate, 1)
-    return f"約 HK${hkd_val:,.1f}（¥{yen_amount:,}，匯率 {rate:.4f}）"
+    hkd_val = round(yen_amount * jpy_to_hkd, 1)
+    return f"約 HK${hkd_val:,.1f}（¥{yen_amount:,}，匯率 {jpy_to_hkd:.4f}）"
 
-def send_telegram_alert(text, image_url=None):
+def send_telegram_alert(text, image_bytes=None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
     
-    if image_url and image_url.startswith("http"):
+    if image_bytes:
         photo_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
-        payload = {
+        files = {"photo": ("item.jpg", image_bytes, "image/jpeg")}
+        data = {
             "chat_id": TG_CHAT_ID,
-            "photo": image_url,
             "caption": text,
             "parse_mode": "HTML"
         }
         try:
-            res = requests.post(photo_url, json=payload, timeout=12)
+            res = requests.post(photo_url, data=data, files=files, timeout=15)
             if res.status_code == 200:
                 return
             else:
-                print(f"圖片發送失敗（改用文字重試）: {res.text}")
+                print(f"圖片上傳失敗（改用純文字重試）: {res.text}")
         except Exception as e:
-            print(f"圖片發送異常: {e}")
+            print(f"圖片上傳異常: {e}")
 
     msg_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {
@@ -113,7 +79,18 @@ def load_keywords():
                 keywords.append(kw)
     return keywords
 
-def scrape_mercari(page, keyword):
+def download_image_bytes(context, img_url):
+    if not img_url or not img_url.startswith("http"):
+        return None
+    try:
+        resp = context.request.get(img_url, timeout=10000)
+        if resp.ok:
+            return resp.body()
+    except Exception as e:
+        print(f"下載圖片失敗: {e}")
+    return None
+
+def scrape_mercari(page, keyword, usd_to_jpy):
     encoded_kw = urllib.parse.quote(keyword)
     url = f"https://jp.mercari.com/search?keyword={encoded_kw}&sort=created_time&order=desc&status=on_sale"
     results = []
@@ -145,16 +122,24 @@ def scrape_mercari(page, keyword):
             aria_label = link.get_attribute("aria-label") or ""
             combined_text = f"{raw_text}\n{aria_label}"
 
-            price = None
-            pm = re.search(r"[¥￥]\s*([0-9,]+)|([0-9,]+)\s*円", combined_text)
-            if pm:
-                val = pm.group(1) or pm.group(2)
-                price = int(val.replace(",", ""))
+            yen_price = None
+            pm_yen = re.search(r"[¥￥]\s*([0-9,]+)|([0-9,]+)\s*円", combined_text)
+            if pm_yen:
+                val = pm_yen.group(1) or pm_yen.group(2)
+                yen_price = int(val.replace(",", ""))
+            else:
+                pm_usd = re.search(r"US\$\s*([0-9,.]+)", combined_text)
+                if pm_usd:
+                    usd_val = float(pm_usd.group(1).replace(",", ""))
+                    yen_price = int(round(usd_val * usd_to_jpy))
 
-            lines = [x.strip() for x in raw_text.split("\n") if x.strip()]
+            cleaned_text = re.sub(r"US\$\s*[0-9,.]+\s*", "", raw_text)
+            cleaned_text = re.sub(r"[¥￥]\s*[0-9,]+\s*", "", cleaned_text)
+            lines = [x.strip() for x in cleaned_text.split("\n") if x.strip()]
+            
             title_parts = []
             for line in lines:
-                if re.search(r"^[¥￥]\s*[0-9,]+$|^[0-9,]+\s*円$", line):
+                if re.search(r"^[0-9,]+\s*円$", line):
                     continue
                 if "SOLD" in line.upper() or "売り切れ" in line:
                     continue
@@ -165,8 +150,8 @@ def scrape_mercari(page, keyword):
                 "platform": "Mercari",
                 "id": item_id,
                 "title": title[:80],
-                "price": price,
-                "image": img_url
+                "price": yen_price,
+                "image_url": img_url
             })
     except Exception as e:
         print(f"Mercari 搜尋 [{keyword}] 出錯: {e}")
@@ -216,7 +201,7 @@ def scrape_yahoo_auctions(page, keyword):
                 "id": item_id,
                 "title": title[:80],
                 "price": price,
-                "image": img_url
+                "image_url": img_url
             })
     except Exception as e:
         print(f"Yahoo 拍賣搜尋 [{keyword}] 出錯: {e}")
@@ -228,7 +213,7 @@ def run_watch():
         print("keywords.txt 為空，無關鍵詞需要監控")
         return
 
-    rate = get_live_exchange_rate()
+    jpy_to_hkd, usd_to_jpy = get_exchange_rates()
 
     seen_data = {}
     if os.path.exists(SEEN_FILE):
@@ -244,8 +229,13 @@ def run_watch():
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            locale="ja-JP"
+            locale="ja-JP",
+            timezone_id="Asia/Tokyo"
         )
+        context.add_cookies([
+            {"name": "mercari_currency", "value": "JPY", "domain": ".mercari.com", "path": "/"},
+            {"name": "country_code", "value": "JP", "domain": ".mercari.com", "path": "/"}
+        ])
         page = context.new_page()
 
         for kw in keywords:
@@ -255,7 +245,7 @@ def run_watch():
 
             known_ids = set(seen_data[kw])
 
-            mc_items = scrape_mercari(page, kw)
+            mc_items = scrape_mercari(page, kw, usd_to_jpy)
             yh_items = scrape_yahoo_auctions(page, kw)
             all_found = mc_items + yh_items
 
@@ -268,21 +258,21 @@ def run_watch():
                     new_count += 1
 
                     if not is_first_time_kw:
-                        zh_title = translate_title_with_gemini(item["title"])
-                        price_str = format_price_hkd_first(item["price"], rate)
+                        price_str = format_price_hkd_first(item["price"], jpy_to_hkd)
+                        img_bytes = download_image_bytes(context, item.get("image_url"))
+                        
                         msg = (
-                            f"🆕 <b>{zh_title}</b>\n"
-                            f"日文原名：{item['title']}\n"
+                            f"🆕 <b>{item['title']}</b>\n"
                             f"平台：{item['platform']}\n"
                             f"價格：<b>{price_str}</b>\n"
                             f"關鍵詞：{kw}\n"
                             f"ID：<code>{item['id']}</code>（點擊複製）"
                         )
-                        send_telegram_alert(msg, item.get("image"))
+                        send_telegram_alert(msg, img_bytes)
 
             if is_first_time_kw:
                 print(f"📌 初始化關鍵詞 [{kw}]，已收錄 {new_count} 件現有商品基準")
-                send_telegram_alert(f"📌 <b>關鍵詞上新監控已啟動！</b>\n關鍵詞：<code>{kw}</code>\n已建立現有商品基準（共 {new_count} 件），之後一有新上架即刻發圖及 Gemini AI 翻譯通知。")
+                send_telegram_alert(f"📌 <b>關鍵詞上新監控已啟動！</b>\n關鍵詞：<code>{kw}</code>\n已建立現有商品基準（共 {new_count} 件），之後一有新上架即刻發圖通知。")
 
             seen_data[kw] = list(known_ids)[-300:]
 
@@ -293,7 +283,7 @@ def run_watch():
             json.dump(seen_data, f, indent=2, ensure_ascii=False)
 
 if __name__ == "__main__":
-    print("🚀 啟動 Mercari + 雅虎拍賣 極速 Gemini 翻譯圖文上新監控...")
+    print("🚀 啟動 Mercari + 雅虎拍賣 極速圖文上新監控...")
     for i in range(400):
         try:
             run_watch()
