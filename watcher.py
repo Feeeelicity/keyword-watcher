@@ -40,7 +40,6 @@ def send_telegram_alert(text, image_url=None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
     
-    # 如果有抓到商品圖片，優先使用 sendPhoto 發送圖文訊息
     if image_url and image_url.startswith("http"):
         photo_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
         payload = {
@@ -53,12 +52,9 @@ def send_telegram_alert(text, image_url=None):
             res = requests.post(photo_url, json=payload, timeout=12)
             if res.status_code == 200:
                 return
-            else:
-                print(f"圖片發送失敗（改用純文字重試）: {res.text}")
         except Exception as e:
             print(f"圖片發送異常: {e}")
 
-    # 無圖片或圖片連結失效時，自動改用純文字發送
     msg_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TG_CHAT_ID,
@@ -105,7 +101,6 @@ def scrape_mercari(page, keyword):
                 continue
             seen_in_page.add(item_id)
 
-            # 抓取商品圖片網址
             img_url = None
             try:
                 img_el = link.locator("img").first
@@ -160,7 +155,6 @@ def scrape_yahoo_auctions(page, keyword):
                 continue
             item_id = m.group(1)
 
-            # 抓取雅虎拍賣商品圖片網址
             img_url = None
             try:
                 img_el = item.locator("img.Product__imageData").first
@@ -256,3 +250,13 @@ def run_watch():
 
     if updated:
         with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(seen_data, f, indent=2, ensure_ascii=False)
+
+if __name__ == "__main__":
+    print("🚀 啟動 Mercari + 雅虎拍賣 極速圖文上新監控...")
+    for i in range(400):
+        try:
+            run_watch()
+        except Exception as e:
+            print(f"輪巡異常: {e}")
+        time.sleep(12)
