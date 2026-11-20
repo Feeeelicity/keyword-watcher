@@ -8,8 +8,38 @@ from playwright.sync_api import sync_playwright
 
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 KEYWORDS_FILE = "keywords.txt"
 SEEN_FILE = "seen_items.json"
+
+def translate_title_with_gemini(jp_title):
+    if not GEMINI_API_KEY or not jp_title:
+        return jp_title
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    prompt = (
+        "你是日本二手交易平台（Mercari / Yahoo拍賣）動漫周邊與玩具商品翻譯專家。"
+        "請將以下日文商品標題準確翻譯成簡潔自然的繁體中文（香港慣用語）。"
+        "遇到動漫作品與專有名詞請使用常見中文譯名（例如：プリパラ=星光樂園、プリティーリズム=星光少女、アイカツ=星夢學園、プリズムストーン=Prism Stone/光環石、マイメロディ=My Melody、マイスウィートピアノ=My Sweet Piano、ぬいぐるみ=毛公仔/毛絨玩具、まとめ売り=套裝組合/打包出售、未開封=全新未開封）。"
+        "只輸出翻譯後的中文標題本身，絕對不要加任何引號、解釋或額外文字：\n\n"
+        f"{jp_title}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1}
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            translated = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            if translated:
+                return translated
+        else:
+            print(f"Gemini API 回應異常: {res.status_code} {res.text}")
+    except Exception as e:
+        print(f"Gemini 翻譯異常（保留原名）: {e}")
+    return jp_title
 
 def get_live_exchange_rate():
     try:
@@ -134,7 +164,7 @@ def scrape_mercari(page, keyword):
             results.append({
                 "platform": "Mercari",
                 "id": item_id,
-                "title": title[:60],
+                "title": title[:80],
                 "price": price,
                 "image": img_url
             })
@@ -184,7 +214,7 @@ def scrape_yahoo_auctions(page, keyword):
             results.append({
                 "platform": "Yahoo! 拍賣",
                 "id": item_id,
-                "title": title[:60],
+                "title": title[:80],
                 "price": price,
                 "image": img_url
             })
@@ -238,9 +268,11 @@ def run_watch():
                     new_count += 1
 
                     if not is_first_time_kw:
+                        zh_title = translate_title_with_gemini(item["title"])
                         price_str = format_price_hkd_first(item["price"], rate)
                         msg = (
-                            f"🆕 <b>{item['title']}</b>\n"
+                            f"🆕 <b>{zh_title}</b>\n"
+                            f"日文原名：{item['title']}\n"
                             f"平台：{item['platform']}\n"
                             f"價格：<b>{price_str}</b>\n"
                             f"關鍵詞：{kw}\n"
@@ -250,7 +282,7 @@ def run_watch():
 
             if is_first_time_kw:
                 print(f"📌 初始化關鍵詞 [{kw}]，已收錄 {new_count} 件現有商品基準")
-                send_telegram_alert(f"📌 <b>關鍵詞上新監控已啟動！</b>\n關鍵詞：<code>{kw}</code>\n已建立現有商品基準（共 {new_count} 件），之後一有新上架即刻發圖通知。")
+                send_telegram_alert(f"📌 <b>關鍵詞上新監控已啟動！</b>\n關鍵詞：<code>{kw}</code>\n已建立現有商品基準（共 {new_count} 件），之後一有新上架即刻發圖及 Gemini AI 翻譯通知。")
 
             seen_data[kw] = list(known_ids)[-300:]
 
@@ -261,7 +293,7 @@ def run_watch():
             json.dump(seen_data, f, indent=2, ensure_ascii=False)
 
 if __name__ == "__main__":
-    print("🚀 啟動 Mercari + 雅虎拍賣 極速圖文上新監控...")
+    print("🚀 啟動 Mercari + 雅虎拍賣 極速 Gemini 翻譯圖文上新監控...")
     for i in range(400):
         try:
             run_watch()
