@@ -30,11 +30,11 @@ def get_live_exchange_rate():
         pass
     return 0.050
 
-def format_price(yen_amount, rate):
+def format_price_hkd_first(yen_amount, rate):
     if not yen_amount:
         return "價格未明"
     hkd_val = round(yen_amount * rate, 1)
-    return f"¥{yen_amount:,}（約 HK${hkd_val:,.1f}）"
+    return f"約 HK${hkd_val:,.1f}（¥{yen_amount:,}，匯率 {rate:.4f}）"
 
 def send_telegram_alert(text, image_url=None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
@@ -52,6 +52,8 @@ def send_telegram_alert(text, image_url=None):
             res = requests.post(photo_url, json=payload, timeout=12)
             if res.status_code == 200:
                 return
+            else:
+                print(f"圖片發送失敗（改用文字重試）: {res.text}")
         except Exception as e:
             print(f"圖片發送異常: {e}")
 
@@ -110,17 +112,23 @@ def scrape_mercari(page, keyword):
                 pass
 
             raw_text = link.inner_text().strip()
-            lines = [x.strip() for x in raw_text.split("\n") if x.strip()]
-            
+            aria_label = link.get_attribute("aria-label") or ""
+            combined_text = f"{raw_text}\n{aria_label}"
+
             price = None
+            pm = re.search(r"[¥￥]\s*([0-9,]+)|([0-9,]+)\s*円", combined_text)
+            if pm:
+                val = pm.group(1) or pm.group(2)
+                price = int(val.replace(",", ""))
+
+            lines = [x.strip() for x in raw_text.split("\n") if x.strip()]
             title_parts = []
             for line in lines:
-                pm = re.search(r"[¥￥]\s*([0-9,]+)|([0-9,]+)\s*円", line)
-                if pm and price is None:
-                    val = pm.group(1) or pm.group(2)
-                    price = int(val.replace(",", ""))
-                elif "SOLD" not in line.upper() and "売り切れ" not in line:
-                    title_parts.append(line)
+                if re.search(r"^[¥￥]\s*[0-9,]+$|^[0-9,]+\s*円$", line):
+                    continue
+                if "SOLD" in line.upper() or "売り切れ" in line:
+                    continue
+                title_parts.append(line)
 
             title = " ".join(title_parts) if title_parts else "Mercari 新上架商品"
             results.append({
@@ -230,13 +238,13 @@ def run_watch():
                     new_count += 1
 
                     if not is_first_time_kw:
-                        price_str = format_price(item["price"], rate)
+                        price_str = format_price_hkd_first(item["price"], rate)
                         msg = (
-                            f"🆕 <b>【{item['platform']}】有新貨上架！</b>\n"
-                            f"目前價格：<b>{price_str}</b>\n"
+                            f"🆕 <b>{item['title']}</b>\n"
+                            f"平台：{item['platform']}\n"
+                            f"價格：<b>{price_str}</b>\n"
                             f"關鍵詞：{kw}\n"
-                            f"商品：{item['title']}\n"
-                            f"商品 ID：<code>{item['id']}</code>（點擊複製）"
+                            f"ID：<code>{item['id']}</code>（點擊複製）"
                         )
                         send_telegram_alert(msg, item.get("image"))
 
