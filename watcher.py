@@ -34,6 +34,7 @@ def format_price_hkd_first(yen_amount, jpy_to_hkd):
 
 def send_telegram_alert(text, image_bytes=None):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        print("⚠️ 缺少 TG_BOT_TOKEN 或 TG_CHAT_ID", flush=True)
         return
     
     if image_bytes:
@@ -47,11 +48,12 @@ def send_telegram_alert(text, image_bytes=None):
         try:
             res = requests.post(photo_url, data=data, files=files, timeout=15)
             if res.status_code == 200:
+                print("✅ Telegram 圖文通知發送成功！", flush=True)
                 return
             else:
-                print(f"圖片上傳失敗（改用純文字重試）: {res.text}")
+                print(f"⚠️ 圖片上傳失敗（改用純文字重試）: {res.text}", flush=True)
         except Exception as e:
-            print(f"圖片上傳異常: {e}")
+            print(f"⚠️ 圖片上傳異常: {e}", flush=True)
 
     msg_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = {
@@ -61,9 +63,13 @@ def send_telegram_alert(text, image_bytes=None):
         "disable_web_page_preview": True
     }
     try:
-        requests.post(msg_url, json=payload, timeout=10)
+        res = requests.post(msg_url, json=payload, timeout=10)
+        if res.status_code == 200:
+            print("✅ Telegram 文字通知發送成功！", flush=True)
+        else:
+            print(f"❌ Telegram 文字發送失敗: {res.status_code} {res.text}", flush=True)
     except Exception as e:
-        print(f"Telegram 文字發送失敗: {e}")
+        print(f"❌ Telegram 連線異常: {e}", flush=True)
 
 def load_keywords():
     keywords = []
@@ -87,7 +93,7 @@ def download_image_bytes(context, img_url):
         if resp.ok:
             return resp.body()
     except Exception as e:
-        print(f"下載圖片失敗: {e}")
+        print(f"下載圖片失敗: {e}", flush=True)
     return None
 
 def scrape_mercari(page, keyword, usd_to_jpy):
@@ -95,12 +101,17 @@ def scrape_mercari(page, keyword, usd_to_jpy):
     url = f"https://jp.mercari.com/search?keyword={encoded_kw}&sort=created_time&order=desc&status=on_sale"
     results = []
     try:
-        page.goto(url, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(3500)
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        try:
+            page.wait_for_selector("a[href*='/item/m']", timeout=15000)
+            page.wait_for_timeout(1500)
+        except Exception:
+            print(f"⚠️ Mercari [{keyword}] 頁面載入逾時或目前無商品", flush=True)
+            return results
         
         links = page.locator("a[href*='/item/m']").all()
         seen_in_page = set()
-        for link in links[:15]:
+        for link in links[:20]:
             href = link.get_attribute("href") or ""
             m = re.search(r"(m\d+)", href)
             if not m:
@@ -154,7 +165,7 @@ def scrape_mercari(page, keyword, usd_to_jpy):
                 "image_url": img_url
             })
     except Exception as e:
-        print(f"Mercari 搜尋 [{keyword}] 出錯: {e}")
+        print(f"❌ Mercari 搜尋 [{keyword}] 出錯: {e}", flush=True)
     return results
 
 def scrape_yahoo_auctions(page, keyword):
@@ -163,10 +174,13 @@ def scrape_yahoo_auctions(page, keyword):
     results = []
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(3000)
+        try:
+            page.wait_for_selector("li.Product", timeout=10000)
+        except Exception:
+            return results
         
         items = page.locator("li.Product").all()
-        for item in items[:15]:
+        for item in items[:20]:
             title_el = item.locator("a.Product__titleLink").first
             if title_el.count() == 0:
                 continue
@@ -204,13 +218,13 @@ def scrape_yahoo_auctions(page, keyword):
                 "image_url": img_url
             })
     except Exception as e:
-        print(f"Yahoo 拍賣搜尋 [{keyword}] 出錯: {e}")
+        print(f"❌ Yahoo 拍賣搜尋 [{keyword}] 出錯: {e}", flush=True)
     return results
 
-def run_watch():
+def run_watch(round_num):
     keywords = load_keywords()
     if not keywords:
-        print("keywords.txt 為空，無關鍵詞需要監控")
+        print("⚠️ keywords.txt 為空，無關鍵詞需要監控", flush=True)
         return
 
     jpy_to_hkd, usd_to_jpy = get_exchange_rates()
@@ -249,6 +263,9 @@ def run_watch():
             yh_items = scrape_yahoo_auctions(page, kw)
             all_found = mc_items + yh_items
 
+            if round_num % 5 == 1:
+                print(f"🔍 第 {round_num} 輪 [{kw}] 掃描完成：Mercari {len(mc_items)} 件 | Yahoo! 拍賣 {len(yh_items)} 件", flush=True)
+
             new_count = 0
             for item in all_found:
                 uid = f"{item['platform']}_{item['id']}"
@@ -258,6 +275,7 @@ def run_watch():
                     new_count += 1
 
                     if not is_first_time_kw:
+                        print(f"🎉 發現新品：[{item['platform']}] {item['title']} ({item['id']})", flush=True)
                         price_str = format_price_hkd_first(item["price"], jpy_to_hkd)
                         img_bytes = download_image_bytes(context, item.get("image_url"))
                         
@@ -270,9 +288,11 @@ def run_watch():
                         )
                         send_telegram_alert(msg, img_bytes)
 
-            if is_first_time_kw:
-                print(f"📌 初始化關鍵詞 [{kw}]，已收錄 {new_count} 件現有商品基準")
+            if is_first_time_kw and new_count > 0:
+                print(f"📌 初始化關鍵詞 [{kw}]，已收錄 {new_count} 件現有商品基準", flush=True)
                 send_telegram_alert(f"📌 <b>關鍵詞上新監控已啟動！</b>\n關鍵詞：<code>{kw}</code>\n已建立現有商品基準（共 {new_count} 件），之後一有新上架即刻發圖通知。")
+            elif is_first_time_kw and new_count == 0:
+                del seen_data[kw]
 
             seen_data[kw] = list(known_ids)[-300:]
 
@@ -283,10 +303,11 @@ def run_watch():
             json.dump(seen_data, f, indent=2, ensure_ascii=False)
 
 if __name__ == "__main__":
-    print("🚀 啟動 Mercari + 雅虎拍賣 極速圖文上新監控...")
-    for i in range(400):
+    print("🚀 啟動 Mercari + 雅虎拍賣 極速圖文上新監控...", flush=True)
+    send_telegram_alert("✅ 雲端監控已啟動，新 Bot 連線正常！")
+    for i in range(1, 401):
         try:
-            run_watch()
+            run_watch(i)
         except Exception as e:
-            print(f"輪巡異常: {e}")
+            print(f"輪巡異常: {e}", flush=True)
         time.sleep(12)
