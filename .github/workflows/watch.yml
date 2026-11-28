@@ -41,7 +41,7 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase || true
           git add seen_items.json || true
           git commit -m "Update seen items [skip ci]" || true
+          git pull --rebase || true
           git push || true
