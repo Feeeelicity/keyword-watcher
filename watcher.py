@@ -10,6 +10,7 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 KEYWORDS_FILE = "keywords.txt"
 SEEN_FILE = "seen_items.json"
+MAX_RUN_SECONDS = 25 * 60  # 每輪最多跑 25 分鐘，然後安全結束並將已讀名單存回 GitHub
 
 def get_exchange_rates():
     jpy_to_hkd = 0.050
@@ -257,7 +258,9 @@ def run_watch(round_num):
             if is_first_time_kw:
                 seen_data[kw] = []
 
-            known_ids = set(seen_data[kw])
+            # 保持順序清單，避免舊版 set 隨機丟失剛看過的 ID
+            known_list = seen_data[kw]
+            known_set = set(known_list)
 
             mc_items = scrape_mercari(page, kw, usd_to_jpy)
             yh_items = scrape_yahoo_auctions(page, kw)
@@ -269,8 +272,9 @@ def run_watch(round_num):
             new_count = 0
             for item in all_found:
                 uid = f"{item['platform']}_{item['id']}"
-                if uid not in known_ids:
-                    known_ids.add(uid)
+                if uid not in known_set:
+                    known_set.add(uid)
+                    known_list.append(uid)
                     updated = True
                     new_count += 1
 
@@ -294,7 +298,8 @@ def run_watch(round_num):
             elif is_first_time_kw and new_count == 0:
                 del seen_data[kw]
 
-            seen_data[kw] = list(known_ids)[-300:]
+            if kw in seen_data:
+                seen_data[kw] = known_list[-500:]
 
         browser.close()
 
@@ -304,10 +309,13 @@ def run_watch(round_num):
 
 if __name__ == "__main__":
     print("🚀 啟動 Mercari + 雅虎拍賣 極速圖文上新監控...", flush=True)
-    send_telegram_alert("✅ 雲端監控已啟動，新 Bot 連線正常！")
-    for i in range(1, 401):
+    start_time = time.time()
+    round_num = 1
+    while time.time() - start_time < MAX_RUN_SECONDS:
         try:
-            run_watch(i)
+            run_watch(round_num)
         except Exception as e:
             print(f"輪巡異常: {e}", flush=True)
-        time.sleep(12)
+        round_num += 1
+        time.sleep(15)
+    print("⏱️ 本輪 25 分鐘巡查結束，準備儲存已讀記錄並交棒下一輪。", flush=True)
